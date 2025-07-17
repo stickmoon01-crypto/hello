@@ -312,7 +312,7 @@ const VideoCreator: React.FC = () => {
                   label="Default Voice"
                   required
                 >
-                  {Object.values(VoiceEnum).map((voice) => (
+                  {voices.map((voice) => (
                     <MenuItem key={voice} value={voice}>
                       {voice}
                     </MenuItem>

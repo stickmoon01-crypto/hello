@@ -86,14 +86,26 @@ vi.mock("fluent-ffmpeg", () => {
 });
 
 // mock kokoro-js
-vi.mock("kokoro-js", () => {
+vi.mock("kokoro-js", async (importOriginal) => {
+  const actual = await importOriginal();
+  const mockAudio = {
+    audio: {
+      toWav: () => new ArrayBuffer(44),
+      audio: { length: 44100 },
+      sampling_rate: 44100,
+    },
+  };
   return {
+    ...actual,
     KokoroTTS: {
       from_pretrained: vi.fn().mockResolvedValue({
-        generate: vi.fn().mockResolvedValue({
-          toWav: vi.fn().mockReturnValue(new ArrayBuffer(8)),
-          audio: new ArrayBuffer(8),
-          sampling_rate: 44100,
+        stream: vi.fn().mockReturnValue({
+          [Symbol.asyncIterator]: vi.fn().mockReturnValue({
+            next: vi
+              .fn()
+              .mockResolvedValueOnce({ value: mockAudio, done: false })
+              .mockResolvedValue({ done: true }),
+          }),
         }),
       }),
     },
@@ -142,79 +154,96 @@ vi.mock("@remotion/install-whisper-cpp", () => {
   };
 });
 
-test("test me", async () => {
-  const kokoro = await Kokoro.init("fp16");
-  const ffmpeg = await FFMpeg.init();
+async function waitFor(predicate: () => boolean, timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Timeout waiting for condition");
+}
 
-  vi.spyOn(ffmpeg, "saveNormalizedAudio").mockResolvedValue("mocked-path.wav");
-  vi.spyOn(ffmpeg, "saveToMp3").mockResolvedValue("mocked-path.mp3");
+test(
+  "test me",
+  async () => {
+    const kokoro = await Kokoro.init("fp16");
+    const ffmpeg = await FFMpeg.init();
 
-  const pexelsAPI = new PexelsAPI("mock-api-key");
-  vi.spyOn(pexelsAPI, "findVideo").mockResolvedValue({
-    id: "mock-video-id-1",
-    url: "https://example.com/mock-video-1.mp4",
-    width: 1080,
-    height: 1920,
-  });
+    vi.spyOn(ffmpeg, "saveNormalizedAudio").mockResolvedValue(
+      "mocked-path.wav",
+    );
+    vi.spyOn(ffmpeg, "saveToMp3").mockResolvedValue("mocked-path.mp3");
 
-  const config = new Config();
-  const remotion = await Remotion.init(config);
+    const pexelsAPI = new PexelsAPI("mock-api-key");
+    vi.spyOn(pexelsAPI, "findVideo").mockResolvedValue({
+      id: "mock-video-id-1",
+      url: "https://example.com/mock-video-1.mp4",
+      width: 1080,
+      height: 1920,
+    });
 
-  // control the render promise resolution
-  let resolveRenderPromise: () => void;
-  const renderPromiseMock: Promise<void> = new Promise((resolve) => {
-    resolveRenderPromise = resolve;
-  });
-  vi.spyOn(remotion, "render").mockReturnValue(renderPromiseMock);
+    const config = new Config();
+    const remotion = await Remotion.init(config);
 
-  const whisper = await Whisper.init(config);
+    // control the render promise resolution
+    let resolveRenderPromise: () => void;
+    const renderPromiseMock: Promise<void> = new Promise((resolve) => {
+      resolveRenderPromise = resolve;
+    });
+    vi.spyOn(remotion, "render").mockReturnValue(renderPromiseMock);
 
-  vi.spyOn(whisper, "CreateCaption").mockResolvedValue([
-    { text: "This", startMs: 0, endMs: 500 },
-    { text: " is", startMs: 500, endMs: 800 },
-    { text: " a", startMs: 800, endMs: 1000 },
-    { text: " mock", startMs: 1000, endMs: 1500 },
-    { text: " transcription.", startMs: 1500, endMs: 2000 },
-  ]);
+    const whisper = await Whisper.init(config);
 
-  const musicManager = new MusicManager(config);
+    vi.spyOn(whisper, "CreateCaption").mockResolvedValue([
+      { text: "This", startMs: 0, endMs: 500 },
+      { text: " is", startMs: 500, endMs: 800 },
+      { text: " a", startMs: 800, endMs: 1000 },
+      { text: " mock", startMs: 1000, endMs: 1500 },
+      { text: " transcription.", startMs: 1500, endMs: 2000 },
+    ]);
 
-  const shortCreator = new ShortCreator(
-    config,
-    remotion,
-    kokoro,
-    whisper,
-    ffmpeg,
-    pexelsAPI,
-    musicManager,
-  );
+    const musicManager = new MusicManager(config);
 
-  const videoId = shortCreator.addToQueue(
-    [
-      {
-        text: "test",
-        searchTerms: ["test"],
-      },
-    ],
-    {},
-  );
+    const shortCreator = new ShortCreator(
+      config,
+      remotion,
+      kokoro,
+      whisper,
+      ffmpeg,
+      pexelsAPI,
+      musicManager,
+    );
 
-  // list videos while the video is being processed
-  let videos = shortCreator.listAllVideos();
-  expect(videos.find((v) => v.id === videoId)?.status).toBe("processing");
+    const videoId = shortCreator.addToQueue(
+      [
+        {
+          text: "test",
+          searchTerms: ["test"],
+        },
+      ],
+      {},
+    );
 
-  // create the video file on the file system and check the status again
-  fs.writeFileSync(shortCreator.getVideoPath(videoId), "mock video content");
-  videos = shortCreator.listAllVideos();
-  expect(videos.find((v) => v.id === videoId)?.status).toBe("processing");
+    // list videos while the video is being processed
+    let videos = shortCreator.listAllVideos();
+    expect(videos.find((v) => v.id === videoId)?.status).toBe("processing");
 
-  // resolve the render promise to simulate the video being processed, and check the status again
-  resolveRenderPromise();
-  await new Promise((resolve) => setTimeout(resolve, 100)); // let the queue process the video
-  videos = shortCreator.listAllVideos();
-  expect(videos.find((v) => v.id === videoId)?.status).toBe("ready");
+    // create the video file on the file system and check the status again
+    fs.writeFileSync(shortCreator.getVideoPath(videoId), "mock video content");
+    videos = shortCreator.listAllVideos();
+    expect(videos.find((v) => v.id === videoId)?.status).toBe("processing");
 
-  // check the status of the video directly
-  const status = shortCreator.status(videoId);
-  expect(status).toBe("ready");
-});
+    // resolve the render promise to simulate the video being processed, and check the status again
+    resolveRenderPromise();
+    await waitFor(() => shortCreator.status(videoId) === "ready");
+    videos = shortCreator.listAllVideos();
+    expect(videos.find((v) => v.id === videoId)?.status).toBe("ready");
+
+    // check the status of the video directly
+    const status = shortCreator.status(videoId);
+    expect(status).toBe("ready");
+  },
+  10000,
+);

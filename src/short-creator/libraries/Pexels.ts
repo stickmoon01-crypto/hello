@@ -36,12 +36,17 @@ export class PexelsAPI {
         signal: AbortSignal.timeout(timeout),
       },
     )
-      .then((res) => {
+      .then(async (res) => {
+        logger.debug({ status: res.status, statusText: res.statusText }, "Pexels API response");
         if (!res.ok) {
           if (res.status === 401) {
             throw new Error(
               "Invalid Pexels API key - please make sure you get a valid key from https://www.pexels.com/api and set it in the environment variable PEXELS_API_KEY",
             );
+          }
+          if (res.status === 500) {
+            logger.warn("Pexels API returned 500, retrying...");
+            throw new Error("Pexels API returned 500");
           }
           throw new Error(`Pexels API error: ${res.status} ${res.statusText}`);
         }
@@ -147,30 +152,31 @@ export class PexelsAPI {
           timeout,
         );
       } catch (error: unknown) {
-        if (
-          error instanceof Error &&
-          error instanceof DOMException &&
-          error.name === "TimeoutError"
-        ) {
-          if (retryCounter < retryTimes) {
-            logger.warn(
-              { searchTerm, retryCounter },
-              "Timeout error, retrying...",
+        if (error instanceof Error) {
+          if (
+            (error instanceof DOMException && error.name === "TimeoutError") ||
+            error.message === "Pexels API returned 500"
+          ) {
+            if (retryCounter < retryTimes) {
+              logger.warn(
+                { searchTerm, retryCounter, error: error.message },
+                "Retrying...",
+              );
+              return await this.findVideo(
+                searchTerms,
+                minDurationSeconds,
+                excludeIds,
+                orientation,
+                timeout,
+                retryCounter + 1,
+              );
+            }
+            logger.error(
+              { searchTerm, retryCounter, error: error.message },
+              "Retry limit reached",
             );
-            return await this.findVideo(
-              searchTerms,
-              minDurationSeconds,
-              excludeIds,
-              orientation,
-              timeout,
-              retryCounter + 1,
-            );
+            throw error;
           }
-          logger.error(
-            { searchTerm, retryCounter },
-            "Timeout error, retry limit reached",
-          );
-          throw error;
         }
 
         logger.error(error, "Error finding video in Pexels API for term");

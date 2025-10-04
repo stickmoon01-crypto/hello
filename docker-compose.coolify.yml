@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}  # Use 'base' instead of 'large-v3' for faster loading
+      - WHISPER_FALLBACK_MODELS=base,tiny  # Fallback order: base -> tiny
     networks:
       - short-video-network
     volumes:
@@ -61,6 +63,8 @@ services:
       - PIPER_TTS_URL=http://piper-tts:5001
       - NODE_ENV=production
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     ports:
       - "3123:3123"
     depends_on:

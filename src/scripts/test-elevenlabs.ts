@@ -5,7 +5,7 @@ import { ElevenLabsTTS } from "../short-creator/libraries/ElevenLabsTTS";
 
 async function main() {
   const apiKey = process.env.ELEVENLABS_API_KEY as string;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID || "lV90UmdRoVFQHzkxUPeu";
+  const voiceId = process.env.ELEVENLABS_VOICE_ID || "5IRSuKNUc0nJnSPPuxMI";
   if (!apiKey) {
     throw new Error("ELEVENLABS_API_KEY is missing in environment");
   }

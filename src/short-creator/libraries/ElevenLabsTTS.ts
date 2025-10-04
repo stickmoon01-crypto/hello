@@ -4,7 +4,7 @@ import { logger } from "../../config";
 export interface ElevenLabsTTSOptions {
   text: string;
   voiceId: string; // e.g. lV90UmdRoVFQHzkxUPeu
-  modelId?: string; // optional model, default to eleven_multilingual_v2
+  modelId?: string; // optional model, default to eleven_v3 (alpha)
   stability?: number;
   similarityBoost?: number;
   style?: number;
@@ -31,28 +31,29 @@ export class ElevenLabsTTS {
     const {
       text,
       voiceId,
-      modelId = "eleven_multilingual_v2",
+      modelId = "eleven_v3",
       stability = 1,
       similarityBoost = 1,
       style = 1.0,
       useSpeakerBoost = true,
     } = options;
 
-    const url = `${this.baseUrl}/text-to-speech/${voiceId}/stream`;
+    // Use the new endpoint format with output_format parameter
+    // Eleven v3 (alpha) supports 70+ languages with enhanced emotional control
+    const url = `${this.baseUrl}/text-to-speech/${voiceId}?output_format=mp3_44100_128`;
 
     const payload = {
       text,
-      model_id: modelId,
+      model_id: modelId, // eleven_v3 - latest and most advanced model
       voice_settings: {
         stability,
         similarity_boost: similarityBoost,
         style,
         use_speaker_boost: useSpeakerBoost,
       },
-      optimize_streaming_latency: 4,
     };
 
-    logger.debug({ url, voiceId }, "Calling ElevenLabs TTS");
+    logger.debug({ url, voiceId, modelId }, "Calling ElevenLabs TTS");
 
     const response = await axios.post(url, payload, {
       responseType: "arraybuffer",

@@ -168,11 +168,11 @@ export class FasterWhisper {
     throw error;
   }
 
-  async CreateCaption(audioPath: string, originalText?: string): Promise<Caption[]> {
-    logger.debug({ audioPath }, "Starting to transcribe audio with Faster-Whisper");
+  async CreateCaption(audioPath: string, originalText?: string, model?: string): Promise<Caption[]> {
+    logger.debug({ audioPath, model }, "Starting to transcribe audio with Faster-Whisper");
 
     try {
-      const transcriptionResult = await this.transcribe({ audioPath });
+      const transcriptionResult = await this.transcribe({ audioPath, model });
       
       logger.debug({ 
         audioPath, 

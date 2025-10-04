@@ -122,9 +122,9 @@ export const renderConfig = z.object({
       "For how long the video should be playing after the speech is done, in milliseconds. 1500 is a good value.",
     ),
   music: z
-    .nativeEnum(MusicMoodEnum)
+    .union([z.nativeEnum(MusicMoodEnum), z.string()])
     .optional()
-    .describe("Music tag to be used to find the right music for the video"),
+    .describe("Music selection: can be a mood tag (chill, happy, etc.) or a keyword from music filename (e.g., 'champion', 'telecasted')"),
   captionPosition: z
     .nativeEnum(CaptionPositionEnum)
     .optional()

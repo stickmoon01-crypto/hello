@@ -5,6 +5,7 @@ import cuid from "cuid";
 import path from "path";
 import https from "https";
 import http from "http";
+import axios from "axios";
 
 import { Kokoro } from "./libraries/Kokoro";
 import { Remotion } from "./libraries/Remotion";
@@ -98,6 +99,79 @@ export class ShortCreator {
     }
   }
 
+  private async performPreFlightChecks(skipCaptions?: boolean): Promise<void> {
+    logger.debug({ skipCaptions }, "Pre-flight checks called with skipCaptions parameter");
+    
+    // Skip Faster-Whisper check if captions are disabled
+    if (skipCaptions) {
+      logger.debug("Skipping Faster-Whisper pre-flight check (captions disabled)");
+      return;
+    }
+
+    logger.debug("Performing pre-flight checks for Faster-Whisper");
+    
+    try {
+      // Find the smallest WAV file in temp directory for testing
+      const tempDir = this.config.tempDirPath;
+      const wavFiles = fs.readdirSync(tempDir)
+        .filter(file => file.endsWith('.wav'))
+        .map(file => ({
+          name: file,
+          path: path.join(tempDir, file),
+          size: fs.statSync(path.join(tempDir, file)).size
+        }))
+        .sort((a, b) => a.size - b.size);
+
+      if (wavFiles.length === 0) {
+        throw new Error("No WAV files found for Faster-Whisper testing");
+      }
+
+      const testWavFile = wavFiles[0];
+      logger.debug({ testFile: testWavFile.name, size: testWavFile.size }, "Using smallest WAV file for Faster-Whisper test");
+      
+      // Try with current model first, then fallback to tiny if needed
+      const modelsToTry = ['base', 'tiny'];
+      let lastError: Error | null = null;
+      
+      for (const model of modelsToTry) {
+        try {
+          logger.debug({ model }, "Testing Faster-Whisper with model");
+          
+          // Test Faster-Whisper transcription with timeout
+          const captions = await Promise.race([
+            this.whisper.CreateCaption(testWavFile.path, "test", model),
+            new Promise<never>((_, reject) => 
+              setTimeout(() => reject(new Error(`Faster-Whisper test timeout after 30 seconds with ${model} model`)), 30000)
+            )
+          ]);
+          
+          if (captions.length === 0) {
+            throw new Error(`Faster-Whisper returned empty captions with ${model} model`);
+          }
+          
+          logger.debug({ model }, "Pre-flight check passed: Faster-Whisper is working");
+          return; // Success, exit the method
+          
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error('Unknown error');
+          logger.warn({ model, error: lastError.message }, `Faster-Whisper test failed with ${model} model, trying next model`);
+          
+          // If this is not the last model, continue to next one
+          if (model !== modelsToTry[modelsToTry.length - 1]) {
+            continue;
+          }
+        }
+      }
+      
+      // If we get here, all models failed
+      throw lastError || new Error("All Faster-Whisper models failed");
+      
+    } catch (error) {
+      logger.error({ error }, "Pre-flight check failed: Faster-Whisper is not working with any model");
+      throw new Error(`Pre-flight check failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
   private async createShort(
     videoId: string,
     inputScenes: SceneInput[],
@@ -111,6 +185,9 @@ export class ShortCreator {
       scene2Duration: number;
     },
   ): Promise<string> {
+    // Pre-flight check: ensure Faster-Whisper is working before using paid services
+    await this.performPreFlightChecks(skipCaptions);
+    
     logger.debug(
       {
         inputScenes,
@@ -174,13 +251,22 @@ export class ShortCreator {
       }
 
       await this.ffmpeg.saveToMp3(audioStream, tempMp3Path);
-      // Use Pollinations AI for dynamic image generation with 768x1365 dimensions
+      // Prefer OpenAI Images for vertical (1080x1920) if OPENAI_API_KEY is provided
+      const tempImagePath = tempVideoPath.replace('.mp4', '_image.png');
       const searchPrompt = scene.searchTerms.join(" ").replace(/\s+/g, " ");
-      const pollinationsImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(searchPrompt)}?width=768&height=1365&model=turbo&nologo=true`;
-      
-      // Download Pollinations image and convert to video
-      const tempImagePath = tempVideoPath.replace('.mp4', '_pollinations.png');
-      await this.downloadPollinationsImage(pollinationsImageUrl, tempImagePath);
+      const useOpenAI = !!process.env.OPENAI_API_KEY;
+      if (useOpenAI) {
+        try {
+          await this.generateOpenAIImage(searchPrompt, tempImagePath);
+        } catch (error) {
+          logger.warn({ error }, "OpenAI image generation failed, falling back to Pollinations");
+          const pollinationsImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(searchPrompt)}?width=768&height=1365&model=turbo&nologo=true`;
+          await this.downloadPollinationsImage(pollinationsImageUrl, tempImagePath);
+        }
+      } else {
+        const pollinationsImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(searchPrompt)}?width=768&height=1365&model=turbo&nologo=true`;
+        await this.downloadPollinationsImage(pollinationsImageUrl, tempImagePath);
+      }
       
       const tempVideoFromImagePath = tempVideoPath.replace('.mp4', '_from_image.mp4');
       await this.convertImageToVideo(tempImagePath, tempVideoFromImagePath, audioLength);
@@ -189,31 +275,13 @@ export class ShortCreator {
       const videoUrl = `http://localhost:${this.config.port}/api/tmp/${tempVideoFileName.replace('.mp4', '_from_image.mp4')}`;
       
       logger.debug({ 
-        searchTerms: scene.searchTerms, 
-        pollinationsUrl: pollinationsImageUrl,
+        searchTerms: scene.searchTerms,
+        provider: useOpenAI ? 'openai' : 'pollinations',
         duration: audioLength,
         outputPath: tempVideoFromImagePath 
-      }, "Created video from Pollinations AI image");
+      }, "Created video from generated image");
 
-      // Add SFX for each scene (use manual sfxId if provided, otherwise auto-assign)
-      const sfxFiles = [
-        "airbus-cabin-pa-beep-tone-passenger-announcement-chime-358248.mp3",
-        "automobile-horn-2-352065.mp3", 
-        "beep-beep-101391.mp3",
-        "car-engine-roaring-376881.mp3",
-        "double-car-horn-352443.mp3",
-        "fast-car-passing-sound-395038.mp3",
-        "fast-swish-transition-noise-352756.mp3",
-        "open-car-door-372469.mp3",
-        "soft-shwaw-sweep-airy-transition-sound-348832.mp3",
-        "swish-sound-94707.mp3",
-        "swoosh-015-383769.mp3",
-        "tear-a-paper-328149.mp3"
-      ];
-      
-      // Use manual sfxId if provided, otherwise auto-assign
-      const sfxId = scene.sfxId || ((index % 12) + 1);
-      
+      // SFX removed - scenes without sound effects
       scenes.push({
         captions,
         video: videoUrl,
@@ -221,10 +289,7 @@ export class ShortCreator {
           url: `http://localhost:${this.config.port}/api/tmp/${tempMp3FileName}`,
           duration: audioLength,
         },
-        sfx: {
-          url: `http://localhost:${this.config.port}/api/sfx/${sfxFiles[sfxId - 1]}`,
-          id: sfxId,
-        },
+        // sfx: removed
       });
 
       totalDuration += audioLength;
@@ -281,13 +346,26 @@ export class ShortCreator {
     return fs.readFileSync(videoPath);
   }
 
-  private findMusic(videoDuration: number, tag?: MusicMoodEnum): MusicForVideo {
-    const musicFiles = this.musicManager.musicList().filter((music) => {
-      if (tag) {
-        return music.mood === tag;
+  private findMusic(videoDuration: number, musicInput?: string | MusicMoodEnum): MusicForVideo {
+    // If musicInput is provided, try to find by keyword or mood
+    if (musicInput) {
+      // Try keyword-based search first
+      const keywordMatch = this.musicManager.findMusicByKeyword(musicInput as string);
+      if (keywordMatch) {
+        return keywordMatch;
       }
-      return true;
-    });
+      
+      // If not found by keyword, try mood-based search
+      const moodMatch = this.musicManager.musicList().find((music) => 
+        music.mood === musicInput
+      );
+      if (moodMatch) {
+        return moodMatch;
+      }
+    }
+    
+    // Fallback to random selection from all music
+    const musicFiles = this.musicManager.musicList();
     return musicFiles[Math.floor(Math.random() * musicFiles.length)];
   }
 
@@ -653,5 +731,104 @@ export class ShortCreator {
 
       makeRequest(imageUrl);
     });
+  }
+
+  private async generateOpenAIImage(prompt: string, outputPath: string): Promise<void> {
+    const apiKey = process.env.OPENAI_API_KEY as string;
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY not set');
+    }
+    // OpenAI Images API compatible request
+    const body = {
+      model: 'gpt-image-1',
+      prompt,
+      size: '1024x1536', // portrait format for GPT-Image-1 (supported sizes: 1024x1024, 1024x1536, 1536x1024)
+      quality: 'high' // GPT-Image-1 supports: auto, high, medium, low
+    };
+    const res = await axios.post('https://api.openai.com/v1/images/generations', body, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      timeout: 180000, // 2 minutes timeout for GPT-Image-1
+    });
+    const b64 = res.data?.data?.[0]?.b64_json as string;
+    if (!b64) throw new Error('OpenAI did not return image');
+    const buffer = Buffer.from(b64, 'base64');
+    fs.writeFileSync(outputPath, buffer);
+    logger.debug({ outputPath, prompt }, 'OpenAI image saved');
+  }
+
+  // Test helpers
+  public async testGenerateImage(prompt: string): Promise<{ tmpFile: string }>{
+    const tempId = cuid();
+    const tempImageFileName = `${tempId}_test_image.png`;
+    const tempImagePath = path.join(this.config.tempDirPath, tempImageFileName);
+    const useOpenAI = !!process.env.OPENAI_API_KEY;
+    const searchPrompt = prompt.replace(/\s+/g, ' ');
+    if (useOpenAI) {
+      try {
+        await this.generateOpenAIImage(searchPrompt, tempImagePath);
+      } catch (error) {
+        logger.warn({ error }, 'OpenAI test image failed, falling back to Pollinations');
+        const pollinationsImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(searchPrompt)}?width=768&height=1365&model=turbo&nologo=true`;
+        await this.downloadPollinationsImage(pollinationsImageUrl, tempImagePath);
+      }
+    } else {
+      const pollinationsImageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(searchPrompt)}?width=768&height=1365&model=turbo&nologo=true`;
+      await this.downloadPollinationsImage(pollinationsImageUrl, tempImagePath);
+    }
+    return { tmpFile: tempImageFileName };
+  }
+
+  public async testGenerateTTS(text: string, voice?: string): Promise<{ tmpMp3: string; duration: number }>{
+    const { audio, audioLength } = await this.kokoro.generate(text, (voice as any) ?? VoiceEnum.af_heart);
+    const tempId = cuid();
+    const tempMp3FileName = `${tempId}_test_tts.mp3`;
+    const tempMp3Path = path.join(this.config.tempDirPath, tempMp3FileName);
+    await this.ffmpeg.saveToMp3(audio, tempMp3Path);
+    return { tmpMp3: tempMp3FileName, duration: audioLength };
+  }
+
+  public async testAssembleImageAndAudio(tmpImage: string, durationSeconds: number): Promise<{ tmpVideo: string }>{
+    const tempId = cuid();
+    const tmpImagePath = path.join(this.config.tempDirPath, tmpImage);
+    const tmpVideoFileName = `${tempId}_test_from_image.mp4`;
+    const tmpVideoPath = path.join(this.config.tempDirPath, tmpVideoFileName);
+    await this.convertImageToVideo(tmpImagePath, tmpVideoPath, durationSeconds);
+    return { tmpVideo: tmpVideoFileName };
+  }
+
+  public async testElevenLabsTTS(text: string, voiceId: string): Promise<{ tmpMp3: string; duration: number }> {
+    // Import ElevenLabsTTS directly for testing
+    const { ElevenLabsTTS } = await import("./libraries/ElevenLabsTTS.js");
+    
+    if (!process.env.ELEVENLABS_API_KEY) {
+      throw new Error("ELEVENLABS_API_KEY is not set");
+    }
+    
+    const elevenLabs = new ElevenLabsTTS(process.env.ELEVENLABS_API_KEY);
+    
+    logger.debug({ text, voiceId }, "Testing ElevenLabs TTS with v3 model");
+    
+    const audio = await elevenLabs.synthesize({
+      text,
+      voiceId,
+      modelId: "eleven_v3"
+    });
+    
+    const tempId = cuid();
+    const tempMp3FileName = `${tempId}_elevenlabs_test.mp3`;
+    const tempMp3Path = path.join(this.config.tempDirPath, tempMp3FileName);
+    
+    // Save audio buffer directly to file
+    await fs.writeFile(tempMp3Path, Buffer.from(audio));
+    
+    // Estimate duration (ElevenLabs returns MP3, estimate ~3kB/s for duration)
+    const duration = audio.byteLength / 3000;
+    
+    logger.debug({ tempMp3FileName, duration, audioSize: audio.byteLength }, "ElevenLabs TTS test completed");
+    
+    return { tmpMp3: tempMp3FileName, duration };
   }
 }
